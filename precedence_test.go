@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,9 @@ package sqlparser
 import (
 	"fmt"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func readable(node Expr) string {
@@ -27,10 +30,12 @@ func readable(node Expr) string {
 		return fmt.Sprintf("(%s or %s)", readable(node.Left), readable(node.Right))
 	case *AndExpr:
 		return fmt.Sprintf("(%s and %s)", readable(node.Left), readable(node.Right))
+	case *XorExpr:
+		return fmt.Sprintf("(%s xor %s)", readable(node.Left), readable(node.Right))
 	case *BinaryExpr:
-		return fmt.Sprintf("(%s %s %s)", readable(node.Left), node.Operator, readable(node.Right))
+		return fmt.Sprintf("(%s %s %s)", readable(node.Left), node.Operator.ToString(), readable(node.Right))
 	case *IsExpr:
-		return fmt.Sprintf("(%s %s)", readable(node.Expr), node.Operator)
+		return fmt.Sprintf("(%s %s)", readable(node.Left), node.Right.ToString())
 	default:
 		return String(node)
 	}
@@ -47,8 +52,9 @@ func TestAndOrPrecedence(t *testing.T) {
 		input:  "select * from a where a=b or c=d and e=f",
 		output: "(a = b or (c = d and e = f))",
 	}}
+	parser := NewTestParser()
 	for _, tcase := range validSQL {
-		tree, err := Parse(tcase.input)
+		tree, err := parser.Parse(tcase.input)
 		if err != nil {
 			t.Error(err)
 			continue
@@ -71,8 +77,9 @@ func TestPlusStarPrecedence(t *testing.T) {
 		input:  "select 1*2+3 from a",
 		output: "((1 * 2) + 3)",
 	}}
+	parser := NewTestParser()
 	for _, tcase := range validSQL {
-		tree, err := Parse(tcase.input)
+		tree, err := parser.Parse(tcase.input)
 		if err != nil {
 			t.Error(err)
 			continue
@@ -98,8 +105,9 @@ func TestIsPrecedence(t *testing.T) {
 		input:  "select * from a where (a=1 and b=2) is true",
 		output: "((a = 1 and b = 2) is true)",
 	}}
+	parser := NewTestParser()
 	for _, tcase := range validSQL {
-		tree, err := Parse(tcase.input)
+		tree, err := parser.Parse(tcase.input)
 		if err != nil {
 			t.Error(err)
 			continue
@@ -108,5 +116,82 @@ func TestIsPrecedence(t *testing.T) {
 		if expr != tcase.output {
 			t.Errorf("Parse: \n%s, want: \n%s", expr, tcase.output)
 		}
+	}
+}
+
+func TestParens(t *testing.T) {
+	tests := []struct {
+		in, expected string
+	}{
+		{in: "12", expected: "12"},
+		{in: "(12)", expected: "12"},
+		{in: "((12))", expected: "12"},
+		{in: "((true) and (false))", expected: "true and false"},
+		{in: "((true) and (false)) and (true)", expected: "true and false and true"},
+		{in: "((true) and (false))", expected: "true and false"},
+		{in: "a=b and (c=d or e=f)", expected: "a = b and (c = d or e = f)"},
+		{in: "(a=b and c=d) or e=f", expected: "a = b and c = d or e = f"},
+		{in: "a & (b | c)", expected: "a & (b | c)"},
+		{in: "(a & b) | c", expected: "a & b | c"},
+		{in: "not (a=b and c=d)", expected: "not (a = b and c = d)"},
+		{in: "not (a=b) and c=d", expected: "not a = b and c = d"},
+		{in: "(not (a=b)) and c=d", expected: "not a = b and c = d"},
+		{in: "-(12)", expected: "-12"},
+		{in: "-(12 + 12)", expected: "-(12 + 12)"},
+		{in: "(1 > 2) and (1 = b)", expected: "1 > 2 and 1 = b"},
+		{in: "(a / b) + c", expected: "a / b + c"},
+		{in: "a / (b + c)", expected: "a / (b + c)"},
+		{in: "(1,2,3)", expected: "(1, 2, 3)"},
+		{in: "(a) between (5) and (7)", expected: "a between 5 and 7"},
+		{in: "(a | b) between (5) and (7)", expected: "a | b between 5 and 7"},
+		{in: "(a and b) between (5) and (7)", expected: "(a and b) between 5 and 7"},
+		{in: "(true is true) is null", expected: "(true is true) is null"},
+		{in: "3 * (100 div 3)", expected: "3 * (100 div 3)"},
+		{in: "100 div 2 div 2", expected: "100 div 2 div 2"},
+		{in: "100 div (2 div 2)", expected: "100 div (2 div 2)"},
+		{in: "(100 div 2) div 2", expected: "100 div 2 div 2"},
+		{in: "((((((1000))))))", expected: "1000"},
+		{in: "100 - (50 + 10)", expected: "100 - (50 + 10)"},
+		{in: "100 - 50 + 10", expected: "100 - 50 + 10"},
+		{in: "true and (true and true)", expected: "true and (true and true)"},
+		{in: "10 - 2 - 1", expected: "10 - 2 - 1"},
+		{in: "(10 - 2) - 1", expected: "10 - 2 - 1"},
+		{in: "10 - (2 - 1)", expected: "10 - (2 - 1)"},
+		{in: "0 <=> (1 and 0)", expected: "0 <=> (1 and 0)"},
+	}
+
+	parser := NewTestParser()
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			stmt, err := parser.Parse("select " + tc.in)
+			require.NoError(t, err)
+			out := String(stmt)
+			require.Equal(t, "select "+tc.expected+" from dual", out)
+		})
+	}
+}
+
+func TestRandom(t *testing.T) {
+	// The purpose of this test is to find discrepancies between Format and parsing. If for example our precedence rules are not consistent between the two, this test should find it.
+	// The idea is to generate random queries, and pass them through the parser and then the unparser, and one more time. The result of the first unparse should be the same as the second result.
+	g := NewGenerator(5)
+	endBy := time.Now().Add(1 * time.Second)
+
+	parser := NewTestParser()
+	for {
+		if time.Now().After(endBy) {
+			break
+		}
+		// Given a random expression
+		randomExpr := g.Expression(ExprGeneratorConfig{})
+		inputQ := "select " + String(randomExpr) + " from t"
+
+		// When it's parsed and unparsed
+		parsedInput, err := parser.Parse(inputQ)
+		require.NoError(t, err, inputQ)
+
+		// Then the unparsing should be the same as the input query
+		outputOfParseResult := String(parsedInput)
+		require.Equal(t, outputOfParseResult, inputQ)
 	}
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -20,13 +20,15 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/xwb1989/sqlparser/dependency/sqltypes"
+	"vitess.io/vitess/go/sqltypes"
+	querypb "vitess.io/vitess/go/vt/proto/query"
 
-	"github.com/xwb1989/sqlparser/dependency/querypb"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewParsedQuery(t *testing.T) {
-	stmt, err := Parse("select * from a where id =:id")
+	parser := NewTestParser()
+	stmt, err := parser.Parse("select * from a where id =:id")
 	if err != nil {
 		t.Error(err)
 		return
@@ -34,7 +36,7 @@ func TestNewParsedQuery(t *testing.T) {
 	pq := NewParsedQuery(stmt)
 	want := &ParsedQuery{
 		Query:         "select * from a where id = :id",
-		bindLocations: []bindLocation{{offset: 27, length: 3}},
+		bindLocations: []BindLocation{{Offset: 27, Length: 3}},
 	}
 	if !reflect.DeepEqual(pq, want) {
 		t.Errorf("GenerateParsedQuery: %+v, want %+v", pq, want)
@@ -75,14 +77,14 @@ func TestGenerateQuery(t *testing.T) {
 			desc:  "tuple *querypb.BindVariable",
 			query: "select * from a where id in ::vals",
 			bindVars: map[string]*querypb.BindVariable{
-				"vals": sqltypes.TestBindVariable([]interface{}{1, "aa"}),
+				"vals": sqltypes.TestBindVariable([]any{1, "aa"}),
 			},
 			output: "select * from a where id in (1, 'aa')",
 		}, {
 			desc:  "list bind vars 0 arguments",
 			query: "select * from a where id in ::vals",
 			bindVars: map[string]*querypb.BindVariable{
-				"vals": sqltypes.TestBindVariable([]interface{}{}),
+				"vals": sqltypes.TestBindVariable([]any{}),
 			},
 			output: "empty list supplied for vals",
 		}, {
@@ -96,7 +98,7 @@ func TestGenerateQuery(t *testing.T) {
 			desc:  "list bind var for non-list",
 			query: "select * from a where id = :vals",
 			bindVars: map[string]*querypb.BindVariable{
-				"vals": sqltypes.TestBindVariable([]interface{}{1}),
+				"vals": sqltypes.TestBindVariable([]any{1}),
 			},
 			output: "unexpected arg type (TUPLE) for non-list key vals",
 		}, {
@@ -104,7 +106,7 @@ func TestGenerateQuery(t *testing.T) {
 			query: "select * from a where b = :equality",
 			extras: map[string]Encodable{
 				"equality": &TupleEqualityList{
-					Columns: []ColIdent{NewColIdent("pk")},
+					Columns: []IdentifierCI{NewIdentifierCI("pk")},
 					Rows: [][]sqltypes.Value{
 						{sqltypes.NewInt64(1)},
 						{sqltypes.NewVarBinary("aa")},
@@ -117,7 +119,7 @@ func TestGenerateQuery(t *testing.T) {
 			query: "select * from a where b = :equality",
 			extras: map[string]Encodable{
 				"equality": &TupleEqualityList{
-					Columns: []ColIdent{NewColIdent("pk1"), NewColIdent("pk2")},
+					Columns: []IdentifierCI{NewIdentifierCI("pk1"), NewIdentifierCI("pk2")},
 					Rows: [][]sqltypes.Value{
 						{
 							sqltypes.NewInt64(1),
@@ -134,8 +136,9 @@ func TestGenerateQuery(t *testing.T) {
 		},
 	}
 
+	parser := NewTestParser()
 	for _, tcase := range tcases {
-		tree, err := Parse(tcase.query)
+		tree, err := parser.Parse(tcase.query)
 		if err != nil {
 			t.Errorf("parse failed for %s: %v", tcase.desc, err)
 			continue
@@ -144,14 +147,61 @@ func TestGenerateQuery(t *testing.T) {
 		buf.Myprintf("%v", tree)
 		pq := buf.ParsedQuery()
 		bytes, err := pq.GenerateQuery(tcase.bindVars, tcase.extras)
-		var got string
 		if err != nil {
-			got = err.Error()
+			assert.Equal(t, tcase.output, err.Error())
 		} else {
-			got = string(bytes)
+			assert.Equal(t, tcase.output, string(bytes))
 		}
-		if got != tcase.output {
-			t.Errorf("for test case: %s, got: '%s', want '%s'", tcase.desc, got, tcase.output)
-		}
+	}
+}
+
+func TestParseAndBind(t *testing.T) {
+	testcases := []struct {
+		in    string
+		binds []*querypb.BindVariable
+		out   string
+	}{
+		{
+			in:  "select * from tbl",
+			out: "select * from tbl",
+		}, {
+			in:  "select * from tbl where b=4 or a=3",
+			out: "select * from tbl where b=4 or a=3",
+		}, {
+			in:  "select * from tbl where b = 4 or a = 3",
+			out: "select * from tbl where b = 4 or a = 3",
+		}, {
+			in:    "select * from tbl where name=%a",
+			binds: []*querypb.BindVariable{sqltypes.StringBindVariable("xyz")},
+			out:   "select * from tbl where name='xyz'",
+		}, {
+			in:    "select * from tbl where c=%a",
+			binds: []*querypb.BindVariable{sqltypes.Int64BindVariable(17)},
+			out:   "select * from tbl where c=17",
+		}, {
+			in:    "select * from tbl where name=%a and c=%a",
+			binds: []*querypb.BindVariable{sqltypes.StringBindVariable("xyz"), sqltypes.Int64BindVariable(17)},
+			out:   "select * from tbl where name='xyz' and c=17",
+		}, {
+			in:    "select * from tbl where name=%a",
+			binds: []*querypb.BindVariable{sqltypes.StringBindVariable("it's")},
+			out:   "select * from tbl where name='it\\'s'",
+		}, {
+			in:    "where name=%a",
+			binds: []*querypb.BindVariable{sqltypes.StringBindVariable("xyz")},
+			out:   "where name='xyz'",
+		}, {
+			in:    "name=%a",
+			binds: []*querypb.BindVariable{sqltypes.StringBindVariable("xyz")},
+			out:   "name='xyz'",
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.in, func(t *testing.T) {
+			query, err := ParseAndBind(tc.in, tc.binds...)
+			assert.NoError(t, err)
+			assert.Equal(t, tc.out, query)
+		})
 	}
 }

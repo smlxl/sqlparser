@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -15,6 +15,8 @@ limitations under the License.
 */
 
 package bytes2
+
+import "unsafe"
 
 // Buffer implements a subset of the write portion of
 // bytes.Buffer, but more efficiently. This is meant to
@@ -57,6 +59,18 @@ func (buf *Buffer) Bytes() []byte {
 // Strings is equivalent to bytes.Buffer.Strings.
 func (buf *Buffer) String() string {
 	return string(buf.bytes)
+}
+
+// StringUnsafe is equivalent to String, but the copy of the string that it returns
+// is _not_ allocated, so modifying this buffer after calling StringUnsafe will lead
+// to undefined behavior.
+func (buf *Buffer) StringUnsafe() string {
+	return unsafe.String(unsafe.SliceData(buf.bytes), len(buf.bytes))
+}
+
+// Reset is equivalent to bytes.Buffer.Reset.
+func (buf *Buffer) Reset() {
+	buf.bytes = buf.bytes[:0]
 }
 
 // Len is equivalent to bytes.Buffer.Len.

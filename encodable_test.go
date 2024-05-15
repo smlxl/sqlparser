@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,10 +17,10 @@ limitations under the License.
 package sqlparser
 
 import (
-	"bytes"
+	"strings"
 	"testing"
 
-	"github.com/xwb1989/sqlparser/dependency/sqltypes"
+	"vitess.io/vitess/go/sqltypes"
 )
 
 func TestEncodable(t *testing.T) {
@@ -39,7 +39,7 @@ func TestEncodable(t *testing.T) {
 	}, {
 		// Single column.
 		in: &TupleEqualityList{
-			Columns: []ColIdent{NewColIdent("pk")},
+			Columns: []IdentifierCI{NewIdentifierCI("pk")},
 			Rows: [][]sqltypes.Value{
 				{sqltypes.NewInt64(1)},
 				{sqltypes.NewVarBinary("aa")},
@@ -49,7 +49,7 @@ func TestEncodable(t *testing.T) {
 	}, {
 		// Multiple columns.
 		in: &TupleEqualityList{
-			Columns: []ColIdent{NewColIdent("pk1"), NewColIdent("pk2")},
+			Columns: []IdentifierCI{NewIdentifierCI("pk1"), NewIdentifierCI("pk2")},
 			Rows: [][]sqltypes.Value{
 				{
 					sqltypes.NewInt64(1),
@@ -64,7 +64,7 @@ func TestEncodable(t *testing.T) {
 		out: "(pk1 = 1 and pk2 = 'aa') or (pk1 = 2 and pk2 = 'bb')",
 	}}
 	for _, tcase := range tcases {
-		buf := new(bytes.Buffer)
+		buf := new(strings.Builder)
 		tcase.in.EncodeSQL(buf)
 		if out := buf.String(); out != tcase.out {
 			t.Errorf("EncodeSQL(%v): %s, want %s", tcase.in, out, tcase.out)
