@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,6 +19,8 @@ package sqlparser
 import (
 	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestLiteralID(t *testing.T) {
@@ -54,14 +56,32 @@ func TestLiteralID(t *testing.T) {
 		in:  "``",
 		id:  LEX_ERROR,
 		out: "",
+	}, {
+		in:  "@x",
+		id:  AT_ID,
+		out: "x",
+	}, {
+		in:  "@@x",
+		id:  AT_AT_ID,
+		out: "x",
+	}, {
+		in:  "@@`x y`",
+		id:  AT_AT_ID,
+		out: "x y",
+	}, {
+		in:  "@@`@x @y`",
+		id:  AT_AT_ID,
+		out: "@x @y",
 	}}
 
+	parser := NewTestParser()
 	for _, tcase := range testcases {
-		tkn := NewStringTokenizer(tcase.in)
-		id, out := tkn.Scan()
-		if tcase.id != id || string(out) != tcase.out {
-			t.Errorf("Scan(%s): %d, %s, want %d, %s", tcase.in, id, out, tcase.id, tcase.out)
-		}
+		t.Run(tcase.in, func(t *testing.T) {
+			tkn := parser.NewStringTokenizer(tcase.in)
+			id, out := tkn.Scan()
+			require.Equal(t, tcase.id, id)
+			require.Equal(t, tcase.out, string(out))
+		})
 	}
 }
 
@@ -129,11 +149,13 @@ func TestString(t *testing.T) {
 		want: "hello",
 	}}
 
+	parser := NewTestParser()
 	for _, tcase := range testcases {
-		id, got := NewStringTokenizer(tcase.in).Scan()
-		if tcase.id != id || string(got) != tcase.want {
-			t.Errorf("Scan(%q) = (%s, %q), want (%s, %q)", tcase.in, tokenName(id), got, tokenName(tcase.id), tcase.want)
-		}
+		t.Run(tcase.in, func(t *testing.T) {
+			id, got := parser.NewStringTokenizer(tcase.in).Scan()
+			require.Equal(t, tcase.id, id, "Scan(%q) = (%s), want (%s)", tcase.in, tokenName(id), tokenName(tcase.id))
+			require.Equal(t, tcase.want, string(got))
+		})
 	}
 }
 
@@ -173,19 +195,132 @@ func TestSplitStatement(t *testing.T) {
 		sql: "",
 	}}
 
+	parser := NewTestParser()
 	for _, tcase := range testcases {
-		sql, rem, err := SplitStatement(tcase.in)
-		if err != nil {
-			t.Errorf("EndOfStatementPosition(%s): ERROR: %v", tcase.in, err)
-			continue
-		}
+		t.Run(tcase.in, func(t *testing.T) {
+			sql, rem, err := parser.SplitStatement(tcase.in)
+			if err != nil {
+				t.Errorf("EndOfStatementPosition(%s): ERROR: %v", tcase.in, err)
+				return
+			}
 
-		if tcase.sql != sql {
-			t.Errorf("EndOfStatementPosition(%s) got sql \"%s\" want \"%s\"", tcase.in, sql, tcase.sql)
-		}
+			if tcase.sql != sql {
+				t.Errorf("EndOfStatementPosition(%s) got sql \"%s\" want \"%s\"", tcase.in, sql, tcase.sql)
+			}
 
-		if tcase.rem != rem {
-			t.Errorf("EndOfStatementPosition(%s) got remainder \"%s\" want \"%s\"", tcase.in, rem, tcase.rem)
-		}
+			if tcase.rem != rem {
+				t.Errorf("EndOfStatementPosition(%s) got remainder \"%s\" want \"%s\"", tcase.in, rem, tcase.rem)
+			}
+		})
+	}
+}
+
+func TestVersion(t *testing.T) {
+	testcases := []struct {
+		version string
+		in      string
+		id      []int
+	}{{
+		version: "5.7.9",
+		in:      "/*!80102 SELECT*/ FROM IN EXISTS",
+		id:      []int{FROM, IN, EXISTS, 0},
+	}, {
+		version: "8.1.1",
+		in:      "/*!80102 SELECT*/ FROM IN EXISTS",
+		id:      []int{FROM, IN, EXISTS, 0},
+	}, {
+		version: "8.2.1",
+		in:      "/*!80102 SELECT*/ FROM IN EXISTS",
+		id:      []int{SELECT, FROM, IN, EXISTS, 0},
+	}, {
+		version: "8.1.2",
+		in:      "/*!80102 SELECT*/ FROM IN EXISTS",
+		id:      []int{SELECT, FROM, IN, EXISTS, 0},
+	}}
+
+	for _, tcase := range testcases {
+		t.Run(tcase.version+"_"+tcase.in, func(t *testing.T) {
+			parser, err := New(Options{MySQLServerVersion: tcase.version})
+			require.NoError(t, err)
+			tok := parser.NewStringTokenizer(tcase.in)
+			for _, expectedID := range tcase.id {
+				id, _ := tok.Scan()
+				require.Equal(t, expectedID, id)
+			}
+		})
+	}
+}
+
+func TestExtractMySQLComment(t *testing.T) {
+	testcases := []struct {
+		comment string
+		version string
+	}{{
+		comment: "/*!50108 SELECT * FROM */",
+		version: "50108",
+	}, {
+		comment: "/*!5018 SELECT * FROM */",
+		version: "",
+	}, {
+		comment: "/*!SELECT * FROM */",
+		version: "",
+	}}
+
+	for _, tcase := range testcases {
+		t.Run(tcase.version, func(t *testing.T) {
+			output, _ := ExtractMysqlComment(tcase.comment)
+			require.Equal(t, tcase.version, output)
+		})
+	}
+}
+
+func TestIntegerAndID(t *testing.T) {
+	testcases := []struct {
+		in  string
+		id  int
+		out string
+	}{{
+		in: "334",
+		id: INTEGRAL,
+	}, {
+		in: "33.4",
+		id: DECIMAL,
+	}, {
+		in: "0x33",
+		id: HEXNUM,
+	}, {
+		in: "33e4",
+		id: FLOAT,
+	}, {
+		in: "33.4e-3",
+		id: FLOAT,
+	}, {
+		in: "33t4",
+		id: ID,
+	}, {
+		in: "0x2et3",
+		id: ID,
+	}, {
+		in:  "3e2t3",
+		id:  LEX_ERROR,
+		out: "3e2",
+	}, {
+		in:  "3.2t",
+		id:  LEX_ERROR,
+		out: "3.2",
+	}}
+
+	parser := NewTestParser()
+	for _, tcase := range testcases {
+		t.Run(tcase.in, func(t *testing.T) {
+			tkn := parser.NewStringTokenizer(tcase.in)
+			id, out := tkn.Scan()
+			require.Equal(t, tcase.id, id)
+			expectedOut := tcase.out
+			if expectedOut == "" {
+				expectedOut = tcase.in
+			}
+			require.Equal(t, expectedOut, out)
+		})
 	}
 }

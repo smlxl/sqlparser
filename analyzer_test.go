@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,21 +17,20 @@ limitations under the License.
 package sqlparser
 
 import (
-	"reflect"
-	"strings"
 	"testing"
 
-	"github.com/xwb1989/sqlparser/dependency/sqltypes"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestPreview(t *testing.T) {
 	testcases := []struct {
 		sql  string
-		want int
+		want StatementType
 	}{
 		{"select ...", StmtSelect},
 		{"    select ...", StmtSelect},
 		{"(select ...", StmtSelect},
+		{"( select ...", StmtSelect},
 		{"insert ...", StmtInsert},
 		{"replace ....", StmtReplace},
 		{"   update ...", StmtUpdate},
@@ -48,6 +47,9 @@ func TestPreview(t *testing.T) {
 		{"begin ...", StmtUnknown},
 		{"begin /* ... */", StmtBegin},
 		{"begin /* ... *//*test*/", StmtBegin},
+		{"begin;", StmtBegin},
+		{"begin ;", StmtBegin},
+		{"begin; /*...*/", StmtBegin},
 		{"start transaction", StmtBegin},
 		{"commit", StmtCommit},
 		{"commit /*...*/", StmtCommit},
@@ -60,13 +62,16 @@ func TestPreview(t *testing.T) {
 		{"set", StmtSet},
 		{"show", StmtShow},
 		{"use", StmtUse},
-		{"analyze", StmtOther},
-		{"describe", StmtOther},
-		{"desc", StmtOther},
-		{"explain", StmtOther},
+		{"analyze", StmtAnalyze},
+		{"describe", StmtExplain},
+		{"desc", StmtExplain},
+		{"explain", StmtExplain},
 		{"repair", StmtOther},
 		{"optimize", StmtOther},
+		{"grant", StmtPriv},
+		{"revoke", StmtPriv},
 		{"truncate", StmtDDL},
+		{"flush", StmtFlush},
 		{"unknown", StmtUnknown},
 
 		{"/* leading comment */ select ...", StmtSelect},
@@ -79,6 +84,7 @@ func TestPreview(t *testing.T) {
 
 		{"/* leading comment no end select ...", StmtUnknown},
 		{"-- leading single line comment no end select ...", StmtUnknown},
+		{"/*!40000 ALTER TABLE `t1` DISABLE KEYS */", StmtComment},
 	}
 	for _, tcase := range testcases {
 		if got := Preview(tcase.sql); got != tcase.want {
@@ -110,6 +116,165 @@ func TestIsDML(t *testing.T) {
 	}
 }
 
+func TestSplitAndExpression(t *testing.T) {
+	testcases := []struct {
+		sql string
+		out []string
+	}{{
+		sql: "select * from t",
+		out: nil,
+	}, {
+		sql: "select * from t where a = 1",
+		out: []string{"a = 1"},
+	}, {
+		sql: "select * from t where a = 1 and b = 1",
+		out: []string{"a = 1", "b = 1"},
+	}, {
+		sql: "select * from t where a = 1 and (b = 1 and c = 1)",
+		out: []string{"a = 1", "b = 1", "c = 1"},
+	}, {
+		sql: "select * from t where a = 1 and (b = 1 or c = 1)",
+		out: []string{"a = 1", "b = 1 or c = 1"},
+	}, {
+		sql: "select * from t where a = 1 and b = 1 or c = 1",
+		out: []string{"a = 1 and b = 1 or c = 1"},
+	}, {
+		sql: "select * from t where a = 1 and b = 1 + (c = 1)",
+		out: []string{"a = 1", "b = 1 + (c = 1)"},
+	}, {
+		sql: "select * from t where (a = 1 and ((b = 1 and c = 1)))",
+		out: []string{"a = 1", "b = 1", "c = 1"},
+	}}
+	parser := NewTestParser()
+	for _, tcase := range testcases {
+		stmt, err := parser.Parse(tcase.sql)
+		assert.NoError(t, err)
+		var expr Expr
+		if where := stmt.(*Select).Where; where != nil {
+			expr = where.Expr
+		}
+		splits := SplitAndExpression(nil, expr)
+		var got []string
+		for _, split := range splits {
+			got = append(got, String(split))
+		}
+		assert.Equal(t, tcase.out, got)
+	}
+}
+
+func TestAndExpressions(t *testing.T) {
+	greaterThanExpr := &ComparisonExpr{
+		Operator: GreaterThanOp,
+		Left: &ColName{
+			Name: NewIdentifierCI("val"),
+			Qualifier: TableName{
+				Name: NewIdentifierCS("a"),
+			},
+		},
+		Right: &ColName{
+			Name: NewIdentifierCI("val"),
+			Qualifier: TableName{
+				Name: NewIdentifierCS("b"),
+			},
+		},
+	}
+	equalExpr := &ComparisonExpr{
+		Operator: EqualOp,
+		Left: &ColName{
+			Name: NewIdentifierCI("id"),
+			Qualifier: TableName{
+				Name: NewIdentifierCS("a"),
+			},
+		},
+		Right: &ColName{
+			Name: NewIdentifierCI("id"),
+			Qualifier: TableName{
+				Name: NewIdentifierCS("b"),
+			},
+		},
+	}
+	testcases := []struct {
+		name           string
+		expressions    Exprs
+		expectedOutput Expr
+	}{
+		{
+			name:           "empty input",
+			expressions:    nil,
+			expectedOutput: nil,
+		}, {
+			name: "two equal inputs",
+			expressions: Exprs{
+				greaterThanExpr,
+				equalExpr,
+				equalExpr,
+			},
+			expectedOutput: &AndExpr{
+				Left:  greaterThanExpr,
+				Right: equalExpr,
+			},
+		},
+		{
+			name: "two equal inputs",
+			expressions: Exprs{
+				equalExpr,
+				equalExpr,
+			},
+			expectedOutput: equalExpr,
+		},
+	}
+
+	for _, testcase := range testcases {
+		t.Run(testcase.name, func(t *testing.T) {
+			output := AndExpressions(testcase.expressions...)
+			assert.Equal(t, String(testcase.expectedOutput), String(output))
+		})
+	}
+}
+
+func TestTableFromStatement(t *testing.T) {
+	testcases := []struct {
+		in, out string
+	}{{
+		in:  "select * from t",
+		out: "t",
+	}, {
+		in:  "select * from t.t",
+		out: "t.t",
+	}, {
+		in:  "select * from t1, t2",
+		out: "table expression is complex",
+	}, {
+		in:  "select * from (t)",
+		out: "table expression is complex",
+	}, {
+		in:  "select * from t1 join t2",
+		out: "table expression is complex",
+	}, {
+		in:  "select * from (select * from t) as tt",
+		out: "table expression is complex",
+	}, {
+		in:  "update t set a=1",
+		out: "unrecognized statement: update t set a=1",
+	}, {
+		in:  "bad query",
+		out: "syntax error at position 4 near 'bad'",
+	}}
+	parser := NewTestParser()
+	for _, tc := range testcases {
+		name, err := parser.TableFromStatement(tc.in)
+		var got string
+		if err != nil {
+			got = err.Error()
+		} else {
+			got = String(name)
+		}
+		if got != tc.out {
+			t.Errorf("TableFromStatement('%s'): %s, want %s", tc.in, got, tc.out)
+		}
+	}
+}
+
 func TestGetTableName(t *testing.T) {
 	testcases := []struct {
 		in, out string
@@ -124,8 +289,9 @@ func TestGetTableName(t *testing.T) {
 		out: "",
 	}}
 
+	parser := NewTestParser()
 	for _, tc := range testcases {
-		tree, err := Parse(tc.in)
+		tree, err := parser.Parse(tc.in)
 		if err != nil {
 			t.Error(err)
 			continue
@@ -145,46 +311,12 @@ func TestIsColName(t *testing.T) {
 		in:  &ColName{},
 		out: true,
 	}, {
-		in: newHexVal(""),
+		in: NewHexLiteral(""),
 	}}
 	for _, tc := range testcases {
 		out := IsColName(tc.in)
 		if out != tc.out {
 			t.Errorf("IsColName(%T): %v, want %v", tc.in, out, tc.out)
-		}
-	}
-}
-
-func TestIsValue(t *testing.T) {
-	testcases := []struct {
-		in  Expr
-		out bool
-	}{{
-		in:  newStrVal("aa"),
-		out: true,
-	}, {
-		in:  newHexVal("3131"),
-		out: true,
-	}, {
-		in:  newIntVal("1"),
-		out: true,
-	}, {
-		in:  newValArg(":a"),
-		out: true,
-	}, {
-		in:  &NullVal{},
-		out: false,
-	}}
-	for _, tc := range testcases {
-		out := IsValue(tc.in)
-		if out != tc.out {
-			t.Errorf("IsValue(%T): %v, want %v", tc.in, out, tc.out)
-		}
-		if tc.out {
-			// NewPlanValue should not fail for valid values.
-			if _, err := NewPlanValue(tc.in); err != nil {
-				t.Error(err)
-			}
 		}
 	}
 }
@@ -197,7 +329,7 @@ func TestIsNull(t *testing.T) {
 		in:  &NullVal{},
 		out: true,
 	}, {
-		in: newStrVal(""),
+		in: NewStrLiteral(""),
 	}}
 	for _, tc := range testcases {
 		out := IsNull(tc.in)
@@ -205,307 +337,4 @@ func TestIsNull(t *testing.T) {
 			t.Errorf("IsNull(%T): %v, want %v", tc.in, out, tc.out)
 		}
 	}
-}
-
-func TestIsSimpleTuple(t *testing.T) {
-	testcases := []struct {
-		in  Expr
-		out bool
-	}{{
-		in:  ValTuple{newStrVal("aa")},
-		out: true,
-	}, {
-		in: ValTuple{&ColName{}},
-	}, {
-		in:  ListArg("::a"),
-		out: true,
-	}, {
-		in: &ColName{},
-	}}
-	for _, tc := range testcases {
-		out := IsSimpleTuple(tc.in)
-		if out != tc.out {
-			t.Errorf("IsSimpleTuple(%T): %v, want %v", tc.in, out, tc.out)
-		}
-		if tc.out {
-			// NewPlanValue should not fail for valid tuples.
-			if _, err := NewPlanValue(tc.in); err != nil {
-				t.Error(err)
-			}
-		}
-	}
-}
-
-func TestNewPlanValue(t *testing.T) {
-	tcases := []struct {
-		in  Expr
-		out sqltypes.PlanValue
-		err string
-	}{{
-		in: &SQLVal{
-			Type: ValArg,
-			Val:  []byte(":valarg"),
-		},
-		out: sqltypes.PlanValue{Key: "valarg"},
-	}, {
-		in: &SQLVal{
-			Type: IntVal,
-			Val:  []byte("10"),
-		},
-		out: sqltypes.PlanValue{Value: sqltypes.NewInt64(10)},
-	}, {
-		in: &SQLVal{
-			Type: IntVal,
-			Val:  []byte("1111111111111111111111111111111111111111"),
-		},
-		err: "value out of range",
-	}, {
-		in: &SQLVal{
-			Type: StrVal,
-			Val:  []byte("strval"),
-		},
-		out: sqltypes.PlanValue{Value: sqltypes.NewVarBinary("strval")},
-	}, {
-		in: &SQLVal{
-			Type: HexVal,
-			Val:  []byte("3131"),
-		},
-		out: sqltypes.PlanValue{Value: sqltypes.NewVarBinary("11")},
-	}, {
-		in: &SQLVal{
-			Type: HexVal,
-			Val:  []byte("313"),
-		},
-		err: "odd length hex string",
-	}, {
-		in:  ListArg("::list"),
-		out: sqltypes.PlanValue{ListKey: "list"},
-	}, {
-		in: ValTuple{
-			&SQLVal{
-				Type: ValArg,
-				Val:  []byte(":valarg"),
-			},
-			&SQLVal{
-				Type: StrVal,
-				Val:  []byte("strval"),
-			},
-		},
-		out: sqltypes.PlanValue{
-			Values: []sqltypes.PlanValue{{
-				Key: "valarg",
-			}, {
-				Value: sqltypes.NewVarBinary("strval"),
-			}},
-		},
-	}, {
-		in: ValTuple{
-			&ParenExpr{Expr: &SQLVal{
-				Type: ValArg,
-				Val:  []byte(":valarg"),
-			}},
-		},
-		err: "expression is too complex",
-	}, {
-		in: ValTuple{
-			ListArg("::list"),
-		},
-		err: "unsupported: nested lists",
-	}, {
-		in:  &NullVal{},
-		out: sqltypes.PlanValue{},
-	}, {
-		in: &ParenExpr{Expr: &SQLVal{
-			Type: ValArg,
-			Val:  []byte(":valarg"),
-		}},
-		err: "expression is too complex",
-	}}
-	for _, tc := range tcases {
-		got, err := NewPlanValue(tc.in)
-		if err != nil {
-			if !strings.Contains(err.Error(), tc.err) {
-				t.Errorf("NewPlanValue(%s) error: %v, want '%s'", String(tc.in), err, tc.err)
-			}
-			continue
-		}
-		if tc.err != "" {
-			t.Errorf("NewPlanValue(%s) error: nil, want '%s'", String(tc.in), tc.err)
-			continue
-		}
-		if !reflect.DeepEqual(got, tc.out) {
-			t.Errorf("NewPlanValue(%s): %v, want %v", String(tc.in), got, tc.out)
-		}
-	}
-}
-
-func TestStringIn(t *testing.T) {
-	testcases := []struct {
-		in1 string
-		in2 []string
-		out bool
-	}{{
-		in1: "v1",
-		in2: []string{"v1", "v2"},
-		out: true,
-	}, {
-		in1: "v0",
-		in2: []string{"v1", "v2"},
-	}}
-	for _, tc := range testcases {
-		out := StringIn(tc.in1, tc.in2...)
-		if out != tc.out {
-			t.Errorf("StringIn(%v,%v): %#v, want %#v", tc.in1, tc.in2, out, tc.out)
-		}
-	}
-}
-
-func TestExtractSetValues(t *testing.T) {
-	testcases := []struct {
-		sql   string
-		out   map[SetKey]interface{}
-		scope string
-		err   string
-	}{{
-		sql: "invalid",
-		err: "syntax error at position 8 near 'invalid'",
-	}, {
-		sql: "select * from t",
-		err: "ast did not yield *sqlparser.Set: *sqlparser.Select",
-	}, {
-		sql: "set autocommit=1+1",
-		err: "invalid syntax: 1 + 1",
-	}, {
-		sql: "set transaction_mode='single'",
-		out: map[SetKey]interface{}{{Key: "transaction_mode", Scope: "session"}: "single"},
-	}, {
-		sql: "set autocommit=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set autocommit=true",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set autocommit=false",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(0)},
-	}, {
-		sql: "set autocommit=on",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: "on"},
-	}, {
-		sql: "set autocommit=off",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: "off"},
-	}, {
-		sql: "set @@global.autocommit=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "global"}: int64(1)},
-	}, {
-		sql: "set @@global.autocommit=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "global"}: int64(1)},
-	}, {
-		sql: "set @@session.autocommit=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set @@session.`autocommit`=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set @@session.'autocommit'=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set @@session.\"autocommit\"=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set @@session.'\"autocommit'=1",
-		out: map[SetKey]interface{}{{Key: "\"autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set @@session.`autocommit'`=1",
-		out: map[SetKey]interface{}{{Key: "autocommit'", Scope: "session"}: int64(1)},
-	}, {
-		sql: "set AUTOCOMMIT=1",
-		out: map[SetKey]interface{}{{Key: "autocommit", Scope: "session"}: int64(1)},
-	}, {
-		sql: "SET character_set_results = NULL",
-		out: map[SetKey]interface{}{{Key: "character_set_results", Scope: "session"}: nil},
-	}, {
-		sql: "SET foo = 0x1234",
-		err: "invalid value type: 0x1234",
-	}, {
-		sql: "SET names utf8",
-		out: map[SetKey]interface{}{{Key: "names", Scope: "session"}: "utf8"},
-	}, {
-		sql: "SET names ascii collate ascii_bin",
-		out: map[SetKey]interface{}{{Key: "names", Scope: "session"}: "ascii"},
-	}, {
-		sql: "SET charset default",
-		out: map[SetKey]interface{}{{Key: "charset", Scope: "session"}: "default"},
-	}, {
-		sql: "SET character set ascii",
-		out: map[SetKey]interface{}{{Key: "charset", Scope: "session"}: "ascii"},
-	}, {
-		sql:   "SET SESSION wait_timeout = 3600",
-		out:   map[SetKey]interface{}{{Key: "wait_timeout", Scope: "session"}: int64(3600)},
-		scope: "session",
-	}, {
-		sql:   "SET GLOBAL wait_timeout = 3600",
-		out:   map[SetKey]interface{}{{Key: "wait_timeout", Scope: "session"}: int64(3600)},
-		scope: "global",
-	}, {
-		sql:   "set session transaction isolation level repeatable read",
-		out:   map[SetKey]interface{}{{Key: "tx_isolation", Scope: "session"}: "repeatable read"},
-		scope: "session",
-	}, {
-		sql:   "set session transaction isolation level read committed",
-		out:   map[SetKey]interface{}{{Key: "tx_isolation", Scope: "session"}: "read committed"},
-		scope: "session",
-	}, {
-		sql:   "set session transaction isolation level read uncommitted",
-		out:   map[SetKey]interface{}{{Key: "tx_isolation", Scope: "session"}: "read uncommitted"},
-		scope: "session",
-	}, {
-		sql:   "set session transaction isolation level serializable",
-		out:   map[SetKey]interface{}{{Key: "tx_isolation", Scope: "session"}: "serializable"},
-		scope: "session",
-	}, {
-		sql:   "set session tx_read_only = 0",
-		out:   map[SetKey]interface{}{{Key: "tx_read_only", Scope: "session"}: int64(0)},
-		scope: "session",
-	}, {
-		sql:   "set session tx_read_only = 1",
-		out:   map[SetKey]interface{}{{Key: "tx_read_only", Scope: "session"}: int64(1)},
-		scope: "session",
-	}, {
-		sql:   "set session sql_safe_updates = 0",
-		out:   map[SetKey]interface{}{{Key: "sql_safe_updates", Scope: "session"}: int64(0)},
-		scope: "session",
-	}, {
-		sql:   "set session sql_safe_updates = 1",
-		out:   map[SetKey]interface{}{{Key: "sql_safe_updates", Scope: "session"}: int64(1)},
-		scope: "session",
-	}}
-	for _, tcase := range testcases {
-		out, _, err := ExtractSetValues(tcase.sql)
-		if tcase.err != "" {
-			if err == nil || err.Error() != tcase.err {
-				t.Errorf("ExtractSetValues(%s): %v, want '%s'", tcase.sql, err, tcase.err)
-			}
-		} else if err != nil {
-			t.Errorf("ExtractSetValues(%s): %v, want no error", tcase.sql, err)
-		}
-		if !reflect.DeepEqual(out, tcase.out) {
-			t.Errorf("ExtractSetValues(%s): %v, want '%v'", tcase.sql, out, tcase.out)
-		}
-	}
-}
-
-func newStrVal(in string) *SQLVal {
-	return NewStrVal([]byte(in))
-}
-
-func newIntVal(in string) *SQLVal {
-	return NewIntVal([]byte(in))
-}
-
-func newHexVal(in string) *SQLVal {
-	return NewHexVal([]byte(in))
-}
-
-func newValArg(in string) *SQLVal {
-	return NewValArg([]byte(in))
 }

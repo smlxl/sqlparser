@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,8 +19,10 @@ package sqltypes
 import (
 	"fmt"
 
-	"github.com/xwb1989/sqlparser/dependency/querypb"
+	querypb "vitess.io/vitess/go/vt/proto/query"
 )
+
+type Type = querypb.Type
 
 // This file provides wrappers and support
 // functions for querypb.Type.
@@ -34,6 +36,12 @@ const (
 	flagIsQuoted   = int(querypb.Flag_ISQUOTED)
 	flagIsText     = int(querypb.Flag_ISTEXT)
 	flagIsBinary   = int(querypb.Flag_ISBINARY)
+)
+
+const (
+	TimestampFormat           = "2006-01-02 15:04:05"
+	TimestampFormatPrecision3 = "2006-01-02 15:04:05.000"
+	TimestampFormatPrecision6 = "2006-01-02 15:04:05.000000"
 )
 
 // IsIntegral returns true if querypb.Type is an integral
@@ -63,10 +71,16 @@ func IsFloat(t querypb.Type) bool {
 	return int(t)&flagIsFloat == flagIsFloat
 }
 
+// IsDecimal returns true is querypb.Type is a decimal.
+// If you have a Value object, use its member function.
+func IsDecimal(t querypb.Type) bool {
+	return t == Decimal
+}
+
 // IsQuoted returns true if querypb.Type is a quoted text or binary.
 // If you have a Value object, use its member function.
 func IsQuoted(t querypb.Type) bool {
-	return int(t)&flagIsQuoted == flagIsQuoted
+	return (int(t)&flagIsQuoted == flagIsQuoted) && t != Bit
 }
 
 // IsText returns true if querypb.Type is a text.
@@ -75,40 +89,68 @@ func IsText(t querypb.Type) bool {
 	return int(t)&flagIsText == flagIsText
 }
 
+func IsTextOrBinary(t querypb.Type) bool {
+	return int(t)&flagIsText == flagIsText || int(t)&flagIsBinary == flagIsBinary
+}
+
 // IsBinary returns true if querypb.Type is a binary.
 // If you have a Value object, use its member function.
 func IsBinary(t querypb.Type) bool {
 	return int(t)&flagIsBinary == flagIsBinary
 }
 
-// isNumber returns true if the type is any type of number.
-func isNumber(t querypb.Type) bool {
+// IsNumber returns true if the type is any type of number.
+func IsNumber(t querypb.Type) bool {
 	return IsIntegral(t) || IsFloat(t) || t == Decimal
 }
 
-// Vitess data types. These are idiomatically
-// named synonyms for the querypb.Type values.
-// Although these constants are interchangeable,
-// they should be treated as different from querypb.Type.
-// Use the synonyms only to refer to the type in Value.
-// For proto variables, use the querypb.Type constants
-// instead.
-// The following conditions are non-overlapping
-// and cover all types: IsSigned(), IsUnsigned(),
-// IsFloat(), IsQuoted(), Null, Decimal, Expression.
-// Also, IsIntegral() == (IsSigned()||IsUnsigned()).
-// TestCategory needs to be updated accordingly if
-// you add a new type.
-// If IsBinary or IsText is true, then IsQuoted is
-// also true. But there are IsQuoted types that are
-// neither binary or text.
-// querypb.Type_TUPLE is not included in this list
-// because it's not a valid Value type.
+// IsDateOrTime returns true if the type represents a date and/or time.
+func IsDateOrTime(t querypb.Type) bool {
+	return t == Datetime || t == Date || t == Timestamp || t == Time
+}
+
+// IsDate returns true if the type has a date component
+func IsDate(t querypb.Type) bool {
+	return t == Datetime || t == Date || t == Timestamp
+}
+
+// IsNull returns true if the type is NULL type
+func IsNull(t querypb.Type) bool {
+	return t == Null
+}
+
+// IsEnum returns true if the type is Enum type
+func IsEnum(t querypb.Type) bool {
+	return t == Enum
+}
+
+// IsSet returns true if the type is Set type
+func IsSet(t querypb.Type) bool {
+	return t == Set
+}
+
+// Vitess data types. These are idiomatically named synonyms for the querypb.Type values.
+// Although these constants are interchangeable, they should be treated as different from querypb.Type.
+// Use the synonyms only to refer to the type in Value. For proto variables, use the querypb.Type constants instead.
+// The following is a complete listing of types that match each classification function in this API:
+//
+//	IsSigned(): INT8, INT16, INT24, INT32, INT64
+//	IsFloat(): FLOAT32, FLOAT64
+//	IsUnsigned(): UINT8, UINT16, UINT24, UINT32, UINT64, YEAR
+//	IsIntegral(): INT8, UINT8, INT16, UINT16, INT24, UINT24, INT32, UINT32, INT64, UINT64, YEAR
+//	IsText(): TEXT, VARCHAR, CHAR, HEXNUM, HEXVAL, BITNUM
+//	IsNumber(): INT8, UINT8, INT16, UINT16, INT24, UINT24, INT32, UINT32, INT64, UINT64, FLOAT32, FLOAT64, YEAR, DECIMAL
+//	IsQuoted(): TIMESTAMP, DATE, TIME, DATETIME, TEXT, BLOB, VARCHAR, VARBINARY, CHAR, BINARY, ENUM, SET, GEOMETRY, JSON
+//	IsBinary(): BLOB, VARBINARY, BINARY
+//	IsDate(): TIMESTAMP, DATE, TIME, DATETIME
+//	IsNull(): NULL_TYPE
+//
 // TODO(sougou): provide a categorization function
 // that returns enums, which will allow for cleaner
 // switch statements for those who want to cover types
 // by their category.
 const (
+	Unknown    = querypb.Type(-1)
 	Null       = querypb.Type_NULL_TYPE
 	Int8       = querypb.Type_INT8
 	Uint8      = querypb.Type_UINT8
@@ -140,6 +182,10 @@ const (
 	Geometry   = querypb.Type_GEOMETRY
 	TypeJSON   = querypb.Type_JSON
 	Expression = querypb.Type_EXPRESSION
+	HexNum     = querypb.Type_HEXNUM
+	HexVal     = querypb.Type_HEXVAL
+	Tuple      = querypb.Type_TUPLE
+	BitNum     = querypb.Type_BITNUM
 )
 
 // bit-shift the mysql flags by two byte so we
@@ -153,7 +199,8 @@ const (
 
 // If you add to this map, make sure you add a test case
 // in tabletserver/endtoend.
-var mysqlToType = map[int64]querypb.Type{
+var mysqlToType = map[byte]querypb.Type{
+	0:   Decimal,
 	1:   Int8,
 	2:   Int16,
 	3:   Int32,
@@ -167,9 +214,15 @@ var mysqlToType = map[int64]querypb.Type{
 	11:  Time,
 	12:  Datetime,
 	13:  Year,
+	15:  VarChar,
 	16:  Bit,
+	17:  Timestamp,
+	18:  Datetime,
+	19:  Time,
 	245: TypeJSON,
 	246: Decimal,
+	247: Enum,
+	248: Set,
 	249: Text,
 	250: Text,
 	251: Text,
@@ -189,37 +242,30 @@ func modifyType(typ querypb.Type, flags int64) querypb.Type {
 		if flags&mysqlUnsigned != 0 {
 			return Uint8
 		}
-		return Int8
 	case Int16:
 		if flags&mysqlUnsigned != 0 {
 			return Uint16
 		}
-		return Int16
 	case Int32:
 		if flags&mysqlUnsigned != 0 {
 			return Uint32
 		}
-		return Int32
 	case Int64:
 		if flags&mysqlUnsigned != 0 {
 			return Uint64
 		}
-		return Int64
 	case Int24:
 		if flags&mysqlUnsigned != 0 {
 			return Uint24
 		}
-		return Int24
 	case Text:
 		if flags&mysqlBinary != 0 {
 			return Blob
 		}
-		return Text
 	case VarChar:
 		if flags&mysqlBinary != 0 {
 			return VarBinary
 		}
-		return VarChar
 	case Char:
 		if flags&mysqlBinary != 0 {
 			return Binary
@@ -230,13 +276,16 @@ func modifyType(typ querypb.Type, flags int64) querypb.Type {
 		if flags&mysqlSet != 0 {
 			return Set
 		}
-		return Char
+	case Year:
+		if flags&mysqlBinary != 0 {
+			return VarBinary
+		}
 	}
 	return typ
 }
 
 // MySQLToType computes the vitess type from mysql type and flags.
-func MySQLToType(mysqlType, flags int64) (typ querypb.Type, err error) {
+func MySQLToType(mysqlType byte, flags int64) (typ querypb.Type, err error) {
 	result, ok := mysqlToType[mysqlType]
 	if !ok {
 		return 0, fmt.Errorf("unsupported type: %d", mysqlType)
@@ -244,9 +293,27 @@ func MySQLToType(mysqlType, flags int64) (typ querypb.Type, err error) {
 	return modifyType(result, flags), nil
 }
 
+// AreTypesEquivalent returns whether two types are equivalent.
+func AreTypesEquivalent(mysqlTypeFromBinlog, mysqlTypeFromSchema querypb.Type) bool {
+	return (mysqlTypeFromBinlog == mysqlTypeFromSchema) ||
+		(mysqlTypeFromBinlog == VarChar && mysqlTypeFromSchema == VarBinary) ||
+		// Binlog only has base type. But doesn't have per-column-flags to differentiate
+		// various logical types. For Binary, Enum, Set types, binlog only returns Char
+		// as data type.
+		(mysqlTypeFromBinlog == Char && mysqlTypeFromSchema == Binary) ||
+		(mysqlTypeFromBinlog == Char && mysqlTypeFromSchema == Enum) ||
+		(mysqlTypeFromBinlog == Char && mysqlTypeFromSchema == Set) ||
+		(mysqlTypeFromBinlog == Text && mysqlTypeFromSchema == Blob) ||
+		(mysqlTypeFromBinlog == Int8 && mysqlTypeFromSchema == Uint8) ||
+		(mysqlTypeFromBinlog == Int16 && mysqlTypeFromSchema == Uint16) ||
+		(mysqlTypeFromBinlog == Int24 && mysqlTypeFromSchema == Uint24) ||
+		(mysqlTypeFromBinlog == Int32 && mysqlTypeFromSchema == Uint32) ||
+		(mysqlTypeFromBinlog == Int64 && mysqlTypeFromSchema == Uint64)
+}
+
 // typeToMySQL is the reverse of mysqlToType.
 var typeToMySQL = map[querypb.Type]struct {
-	typ   int64
+	typ   byte
 	flags int64
 }{
 	Int8:      {typ: 1},
@@ -272,6 +339,9 @@ var typeToMySQL = map[querypb.Type]struct {
 	Decimal:   {typ: 246},
 	Text:      {typ: 252},
 	Blob:      {typ: 252, flags: mysqlBinary},
+	BitNum:    {typ: 253, flags: mysqlBinary},
+	HexNum:    {typ: 253, flags: mysqlBinary},
+	HexVal:    {typ: 253, flags: mysqlBinary},
 	VarChar:   {typ: 253},
 	VarBinary: {typ: 253, flags: mysqlBinary},
 	Char:      {typ: 254},
@@ -282,7 +352,7 @@ var typeToMySQL = map[querypb.Type]struct {
 }
 
 // TypeToMySQL returns the equivalent mysql type and flag for a vitess type.
-func TypeToMySQL(typ querypb.Type) (mysqlType, flags int64) {
+func TypeToMySQL(typ querypb.Type) (mysqlType byte, flags int64) {
 	val := typeToMySQL[typ]
 	return val.typ, val.flags
 }

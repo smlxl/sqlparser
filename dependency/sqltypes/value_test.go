@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -22,7 +22,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xwb1989/sqlparser/dependency/querypb"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/stretchr/testify/require"
+
+	querypb "vitess.io/vitess/go/vt/proto/query"
 )
 
 const (
@@ -82,6 +86,14 @@ func TestNewValue(t *testing.T) {
 		inType: Uint64,
 		inVal:  "1",
 		outVal: TestValue(Uint64, "1"),
+	}, {
+		inType: Uint64,
+		inVal:  "01",
+		outVal: TestValue(Uint64, "01"),
+	}, {
+		inType: Int64,
+		inVal:  "01",
+		outVal: TestValue(Int64, "01"),
 	}, {
 		inType: Float32,
 		inVal:  "1.00",
@@ -153,23 +165,23 @@ func TestNewValue(t *testing.T) {
 	}, {
 		inType: Int64,
 		inVal:  InvalidNeg,
-		outErr: "out of range",
+		outErr: `cannot parse int64 from "-9223372036854775809": overflow`,
 	}, {
 		inType: Int64,
 		inVal:  InvalidPos,
-		outErr: "out of range",
+		outErr: `cannot parse int64 from "18446744073709551616": overflow`,
 	}, {
 		inType: Uint64,
 		inVal:  "-1",
-		outErr: "invalid syntax",
+		outErr: `cannot parse uint64 from "-1"`,
 	}, {
 		inType: Uint64,
 		inVal:  InvalidPos,
-		outErr: "out of range",
+		outErr: `cannot parse uint64 from "18446744073709551616": overflow`,
 	}, {
 		inType: Float64,
 		inVal:  "a",
-		outErr: "invalid syntax",
+		outErr: `unparsed tail left after parsing float64 from "a"`,
 	}, {
 		inType: Expression,
 		inVal:  "a",
@@ -257,9 +269,9 @@ func TestIntegralValue(t *testing.T) {
 	}
 }
 
-func TestInerfaceValue(t *testing.T) {
+func TestInterfaceValue(t *testing.T) {
 	testcases := []struct {
-		in  interface{}
+		in  any
 		out Value
 	}{{
 		in:  nil,
@@ -336,6 +348,65 @@ func TestAccessors(t *testing.T) {
 	if v.IsBinary() {
 		t.Error("v.IsBinary: true, want false")
 	}
+	{
+		i, err := v.ToInt64()
+		if err != nil {
+			t.Errorf("v.ToInt64: got error: %+v, want no error", err)
+		}
+		if i != 1 {
+			t.Errorf("v.ToInt64=%+v, want 1", i)
+		}
+	}
+	{
+		i, err := v.ToUint64()
+		if err != nil {
+			t.Errorf("v.ToUint64: got error: %+v, want no error", err)
+		}
+		if i != 1 {
+			t.Errorf("v.ToUint64=%+v, want 1", i)
+		}
+	}
+	{
+		b, err := v.ToBool()
+		if err != nil {
+			t.Errorf("v.ToBool: got error: %+v, want no error", err)
+		}
+		if !b {
+			t.Errorf("v.ToBool=%+v, want true", b)
+		}
+	}
+}
+
+func TestAccessorsNegative(t *testing.T) {
+	v := TestValue(Int64, "-1")
+	if v.ToString() != "-1" {
+		t.Errorf("v.String=%s, want -1", v.ToString())
+	}
+	if v.IsNull() {
+		t.Error("v.IsNull: true, want false")
+	}
+	if !v.IsIntegral() {
+		t.Error("v.IsIntegral: false, want true")
+	}
+	{
+		i, err := v.ToInt64()
+		if err != nil {
+			t.Errorf("v.ToInt64: got error: %+v, want no error", err)
+		}
+		if i != -1 {
+			t.Errorf("v.ToInt64=%+v, want -1", i)
+		}
+	}
+	{
+		if _, err := v.ToUint64(); err == nil {
+			t.Error("v.ToUint64: got no error, want error")
+		}
+	}
+	{
+		if _, err := v.ToBool(); err == nil {
+			t.Error("v.ToUint64: got no error, want error")
+		}
+	}
 }
 
 func TestToBytesAndString(t *testing.T) {
@@ -344,7 +415,9 @@ func TestToBytesAndString(t *testing.T) {
 		TestValue(Int64, "1"),
 		TestValue(Int64, "12"),
 	} {
-		if b := v.ToBytes(); bytes.Compare(b, v.Raw()) != 0 {
+		vBytes, err := v.ToBytes()
+		require.NoError(t, err)
+		if b := vBytes; !bytes.Equal(b, v.Raw()) {
 			t.Errorf("%v.ToBytes: %s, want %s", v, b, v.Raw())
 		}
 		if s := v.ToString(); s != string(v.Raw()) {
@@ -353,7 +426,9 @@ func TestToBytesAndString(t *testing.T) {
 	}
 
 	tv := TestValue(Expression, "aa")
-	if b := tv.ToBytes(); b != nil {
+	tvBytes, err := tv.ToBytes()
+	require.EqualError(t, err, "expression cannot be converted to bytes")
+	if b := tvBytes; b != nil {
 		t.Errorf("%v.ToBytes: %s, want nil", tv, b)
 	}
 	if s := tv.ToString(); s != "" {
@@ -382,15 +457,19 @@ func TestEncode(t *testing.T) {
 		in:       TestValue(VarChar, "\x00'\"\b\n\r\t\x1A\\"),
 		outSQL:   "'\\0\\'\\\"\\b\\n\\r\\t\\Z\\\\'",
 		outASCII: "'ACciCAoNCRpc'",
+	}, {
+		in:       TestValue(Bit, "a"),
+		outSQL:   "b'01100001'",
+		outASCII: "'YQ=='",
 	}}
 	for _, tcase := range testcases {
-		buf := &bytes.Buffer{}
-		tcase.in.EncodeSQL(buf)
+		var buf strings.Builder
+		tcase.in.EncodeSQL(&buf)
 		if tcase.outSQL != buf.String() {
 			t.Errorf("%v.EncodeSQL = %q, want %q", tcase.in, buf.String(), tcase.outSQL)
 		}
-		buf = &bytes.Buffer{}
-		tcase.in.EncodeASCII(buf)
+		buf.Reset()
+		tcase.in.EncodeASCII(&buf)
 		if tcase.outASCII != buf.String() {
 			t.Errorf("%v.EncodeASCII = %q, want %q", tcase.in, buf.String(), tcase.outASCII)
 		}
@@ -404,5 +483,89 @@ func TestEncodeMap(t *testing.T) {
 	}
 	if SQLDecodeMap[DontEscape] != DontEscape {
 		t.Errorf("SQLDecodeMap[DontEscape] = %v, want %v", SQLEncodeMap[DontEscape], DontEscape)
+	}
+}
+
+func TestHexAndBitToBytes(t *testing.T) {
+	tcases := []struct {
+		in  Value
+		out []byte
+	}{{
+		in:  MakeTrusted(HexNum, []byte("0x1234")),
+		out: []byte{0x12, 0x34},
+	}, {
+		in:  MakeTrusted(HexVal, []byte("X'1234'")),
+		out: []byte{0x12, 0x34},
+	}, {
+		in:  MakeTrusted(BitNum, []byte("0b1001000110100")),
+		out: []byte{0x12, 0x34},
+	}, {
+		in:  MakeTrusted(BitNum, []byte("0b11101010100101010010101010101010101010101000100100100100100101001101010101010101000001")),
+		out: []byte{0x3a, 0xa5, 0x4a, 0xaa, 0xaa, 0xa2, 0x49, 0x25, 0x35, 0x55, 0x41},
+	}}
+
+	for _, tcase := range tcases {
+		t.Run(tcase.in.String(), func(t *testing.T) {
+			out, err := tcase.in.ToBytes()
+			require.NoError(t, err)
+			assert.Equal(t, tcase.out, out)
+		})
+	}
+}
+
+func TestEncodeStringSQL(t *testing.T) {
+	testcases := []struct {
+		in  string
+		out string
+	}{
+		{
+			in:  "",
+			out: "''",
+		},
+		{
+			in:  "\x00'\"\b\n\r\t\x1A\\",
+			out: "'\\0\\'\\\"\\b\\n\\r\\t\\Z\\\\'",
+		},
+	}
+	for _, tcase := range testcases {
+		out := EncodeStringSQL(tcase.in)
+		assert.Equal(t, tcase.out, out)
+	}
+}
+
+func TestDecodeStringSQL(t *testing.T) {
+	testcases := []struct {
+		in  string
+		out string
+		err string
+	}{
+		{
+			in:  "",
+			err: ": invalid SQL encoded string",
+		}, {
+			in:  "''",
+			err: "",
+		},
+		{
+			in:  "'\\0\\'\\\"\\b\\n\\r\\t\\Z\\\\'",
+			out: "\x00'\"\b\n\r\t\x1A\\",
+		},
+		{
+			in:  "'light ''green\\r\\n, \\nfoo'",
+			out: "light 'green\r\n, \nfoo",
+		},
+		{
+			in:  "'foo \\\\ % _bar'",
+			out: "foo \\ % _bar",
+		},
+	}
+	for _, tcase := range testcases {
+		out, err := DecodeStringSQL(tcase.in)
+		if tcase.err != "" {
+			assert.EqualError(t, err, tcase.err)
+		} else {
+			require.NoError(t, err)
+			assert.Equal(t, tcase.out, out)
+		}
 	}
 }

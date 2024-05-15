@@ -1,5 +1,5 @@
 /*
-Copyright 2017 Google Inc.
+Copyright 2019 The Vitess Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -17,43 +17,75 @@ limitations under the License.
 package sqltypes
 
 import (
-	"reflect"
+	"fmt"
 	"strings"
 	"testing"
 
-	"github.com/xwb1989/sqlparser/dependency/querypb"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+
+	querypb "vitess.io/vitess/go/vt/proto/query"
 )
 
+// TestProtoConversions checks coverting to and fro between querypb.Value and sqltypes.Value.
 func TestProtoConversions(t *testing.T) {
-	v := TestValue(Int64, "1")
-	got := ValueToProto(v)
-	want := &querypb.Value{Type: Int64, Value: []byte("1")}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("ValueToProto: %v, want %v", got, want)
+	tcases := []struct {
+		name     string
+		val      Value
+		protoVal *querypb.Value
+	}{
+		{
+			name:     "integer value",
+			val:      TestValue(Int64, "1"),
+			protoVal: &querypb.Value{Type: Int64, Value: []byte("1")},
+		}, {
+			name: "tuple value",
+			val:  TestTuple(TestValue(VarChar, "1"), TestValue(Int64, "3")),
+		}, {
+			name: "tuple of tuple as a value",
+			val: TestTuple(
+				TestTuple(
+					TestValue(VarChar, "1"),
+					TestValue(Int64, "3"),
+				),
+				TestValue(Int64, "5"),
+			),
+		},
 	}
-	gotback := ProtoToValue(got)
-	if !reflect.DeepEqual(gotback, v) {
-		t.Errorf("ProtoToValue: %v, want %v", gotback, v)
+
+	for _, tcase := range tcases {
+		t.Run(tcase.name, func(t *testing.T) {
+			got := ValueToProto(tcase.val)
+			// If we have an expected protoVal, check that serialization matches.
+			// For nested tuples, we do not attempt to generate a protoVal, as it is binary data.
+			// We simply check that the roundtrip is correct.
+			if tcase.protoVal != nil {
+				require.True(t, proto.Equal(got, tcase.protoVal), "ValueToProto: %v, want %v", got, tcase.protoVal)
+			}
+			gotback := ProtoToValue(got)
+			require.EqualValues(t, tcase.val, gotback)
+		})
 	}
 }
 
 func TestBuildBindVariables(t *testing.T) {
 	tcases := []struct {
-		in  map[string]interface{}
+		in  map[string]any
 		out map[string]*querypb.BindVariable
 		err string
 	}{{
 		in:  nil,
 		out: nil,
 	}, {
-		in: map[string]interface{}{
+		in: map[string]any{
 			"k": int64(1),
 		},
 		out: map[string]*querypb.BindVariable{
 			"k": Int64BindVariable(1),
 		},
 	}, {
-		in: map[string]interface{}{
+		in: map[string]any{
 			"k": byte(1),
 		},
 		err: "k: type uint8 not supported as bind var: 1",
@@ -78,7 +110,7 @@ func TestBuildBindVariables(t *testing.T) {
 
 func TestBuildBindVariable(t *testing.T) {
 	tcases := []struct {
-		in  interface{}
+		in  any
 		out *querypb.BindVariable
 		err string
 	}{{
@@ -94,9 +126,39 @@ func TestBuildBindVariable(t *testing.T) {
 			Value: []byte("aa"),
 		},
 	}, {
+		in: true,
+		out: &querypb.BindVariable{
+			Type:  querypb.Type_INT8,
+			Value: []byte("1"),
+		},
+	}, {
+		in: false,
+		out: &querypb.BindVariable{
+			Type:  querypb.Type_INT8,
+			Value: []byte("0"),
+		},
+	}, {
 		in: int(1),
 		out: &querypb.BindVariable{
 			Type:  querypb.Type_INT64,
+			Value: []byte("1"),
+		},
+	}, {
+		in: uint(1),
+		out: &querypb.BindVariable{
+			Type:  querypb.Type_UINT64,
+			Value: []byte("1"),
+		},
+	}, {
+		in: int32(1),
+		out: &querypb.BindVariable{
+			Type:  querypb.Type_INT32,
+			Value: []byte("1"),
+		},
+	}, {
+		in: uint32(1),
+		out: &querypb.BindVariable{
+			Type:  querypb.Type_UINT32,
 			Value: []byte("1"),
 		},
 	}, {
@@ -136,7 +198,7 @@ func TestBuildBindVariable(t *testing.T) {
 			Value: []byte("1"),
 		},
 	}, {
-		in: []interface{}{"aa", int64(1)},
+		in: []any{"aa", int64(1)},
 		out: &querypb.BindVariable{
 			Type: querypb.Type_TUPLE,
 			Values: []*querypb.Value{{
@@ -184,6 +246,42 @@ func TestBuildBindVariable(t *testing.T) {
 			}},
 		},
 	}, {
+		in: []uint{1, 2},
+		out: &querypb.BindVariable{
+			Type: querypb.Type_TUPLE,
+			Values: []*querypb.Value{{
+				Type:  querypb.Type_UINT64,
+				Value: []byte("1"),
+			}, {
+				Type:  querypb.Type_UINT64,
+				Value: []byte("2"),
+			}},
+		},
+	}, {
+		in: []int32{1, 2},
+		out: &querypb.BindVariable{
+			Type: querypb.Type_TUPLE,
+			Values: []*querypb.Value{{
+				Type:  querypb.Type_INT32,
+				Value: []byte("1"),
+			}, {
+				Type:  querypb.Type_INT32,
+				Value: []byte("2"),
+			}},
+		},
+	}, {
+		in: []uint32{1, 2},
+		out: &querypb.BindVariable{
+			Type: querypb.Type_TUPLE,
+			Values: []*querypb.Value{{
+				Type:  querypb.Type_UINT32,
+				Value: []byte("1"),
+			}, {
+				Type:  querypb.Type_UINT32,
+				Value: []byte("2"),
+			}},
+		},
+	}, {
 		in: []int64{1, 2},
 		out: &querypb.BindVariable{
 			Type: querypb.Type_TUPLE,
@@ -223,24 +321,18 @@ func TestBuildBindVariable(t *testing.T) {
 		in:  byte(1),
 		err: "type uint8 not supported as bind var: 1",
 	}, {
-		in:  []interface{}{1, byte(1)},
+		in:  []any{1, byte(1)},
 		err: "type uint8 not supported as bind var: 1",
 	}}
 	for _, tcase := range tcases {
-		bv, err := BuildBindVariable(tcase.in)
-		if err != nil {
-			if err.Error() != tcase.err {
-				t.Errorf("ToBindVar(%T(%v)) error: %v, want %s", tcase.in, tcase.in, err, tcase.err)
+		t.Run(fmt.Sprintf("%v", tcase.in), func(t *testing.T) {
+			bv, err := BuildBindVariable(tcase.in)
+			if tcase.err != "" {
+				require.EqualError(t, err, tcase.err)
+			} else {
+				require.Truef(t, proto.Equal(tcase.out, bv), "binvar output did not match")
 			}
-			continue
-		}
-		if tcase.err != "" {
-			t.Errorf("ToBindVar(%T(%v)) error: nil, want %s", tcase.in, tcase.in, tcase.err)
-			continue
-		}
-		if !reflect.DeepEqual(bv, tcase.out) {
-			t.Errorf("ToBindVar(%T(%v)): %v, want %s", tcase.in, tcase.in, bv, tcase.out)
-		}
+		})
 	}
 }
 
@@ -263,7 +355,7 @@ func TestValidateBindVarables(t *testing.T) {
 				Value: []byte("a"),
 			},
 		},
-		err: `v: strconv.ParseInt: parsing "a": invalid syntax`,
+		err: `v: cannot parse int64 from "a"`,
 	}, {
 		in: map[string]*querypb.BindVariable{
 			"v": {
@@ -274,7 +366,7 @@ func TestValidateBindVarables(t *testing.T) {
 				}},
 			},
 		},
-		err: `v: strconv.ParseInt: parsing "a": invalid syntax`,
+		err: `v: cannot parse int64 from "a"`,
 	}}
 	for _, tcase := range tcases {
 		err := ValidateBindVariables(tcase.in)
@@ -434,31 +526,31 @@ func TestValidateBindVariable(t *testing.T) {
 			Type:  querypb.Type_INT64,
 			Value: []byte(InvalidNeg),
 		},
-		err: "out of range",
+		err: `cannot parse int64 from "-9223372036854775809": overflow`,
 	}, {
 		in: &querypb.BindVariable{
 			Type:  querypb.Type_INT64,
 			Value: []byte(InvalidPos),
 		},
-		err: "out of range",
+		err: `cannot parse int64 from "18446744073709551616": overflow`,
 	}, {
 		in: &querypb.BindVariable{
 			Type:  querypb.Type_UINT64,
 			Value: []byte("-1"),
 		},
-		err: "invalid syntax",
+		err: `cannot parse uint64 from "-1"`,
 	}, {
 		in: &querypb.BindVariable{
 			Type:  querypb.Type_UINT64,
 			Value: []byte(InvalidPos),
 		},
-		err: "out of range",
+		err: `cannot parse uint64 from "18446744073709551616": overflow`,
 	}, {
 		in: &querypb.BindVariable{
 			Type:  querypb.Type_FLOAT64,
 			Value: []byte("a"),
 		},
-		err: "invalid syntax",
+		err: `unparsed tail left after parsing float64 from "a"`,
 	}, {
 		in: &querypb.BindVariable{
 			Type:  querypb.Type_EXPRESSION,
@@ -510,19 +602,16 @@ func TestValidateBindVariable(t *testing.T) {
 
 func TestBindVariableToValue(t *testing.T) {
 	v, err := BindVariableToValue(Int64BindVariable(1))
-	if err != nil {
-		t.Error(err)
-	}
-	want := MakeTrusted(querypb.Type_INT64, []byte("1"))
-	if !reflect.DeepEqual(v, want) {
-		t.Errorf("BindVarToValue(1): %v, want %v", v, want)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, MakeTrusted(querypb.Type_INT64, []byte("1")), v)
 
-	v, err = BindVariableToValue(&querypb.BindVariable{Type: querypb.Type_TUPLE})
-	wantErr := "cannot convert a TUPLE bind var into a value"
-	if err == nil || err.Error() != wantErr {
-		t.Errorf(" BindVarToValue(TUPLE): %v, want %s", err, wantErr)
-	}
+	_, err = BindVariableToValue(&querypb.BindVariable{Type: querypb.Type_TUPLE})
+	require.EqualError(t, err, "cannot convert a TUPLE bind var into a value")
+
+	v, err = BindVariableToValue(BitNumBindVariable([]byte("0b101")))
+	require.NoError(t, err)
+	assert.Equal(t, MakeTrusted(querypb.Type_BITNUM, []byte("0b101")), v)
+
 }
 
 func TestBindVariablesEqual(t *testing.T) {
@@ -549,5 +638,85 @@ func TestBindVariablesEqual(t *testing.T) {
 	}
 	if !BindVariablesEqual(bv1, bv3) {
 		t.Errorf("%v = %v, want not equal", bv1, bv3)
+	}
+}
+
+func TestBindVariablesFormat(t *testing.T) {
+	tupleBindVar, err := BuildBindVariable([]int64{1, 2})
+	if err != nil {
+		t.Fatalf("failed to create a tuple bind var: %v", err)
+	}
+
+	bindVariables := map[string]*querypb.BindVariable{
+		"key_1": StringBindVariable("val_1"),
+		"key_2": Int64BindVariable(789),
+		"key_3": BytesBindVariable([]byte("val_3")),
+		"key_4": tupleBindVar,
+	}
+
+	formattedStr := FormatBindVariables(bindVariables, true /* full */, false /* asJSON */)
+	if !strings.Contains(formattedStr, "key_1") ||
+		!strings.Contains(formattedStr, "val_1") {
+		t.Fatalf("bind variable 'key_1': 'val_1' is not formatted")
+	}
+	if !strings.Contains(formattedStr, "key_2") ||
+		!strings.Contains(formattedStr, "789") {
+		t.Fatalf("bind variable 'key_2': '789' is not formatted")
+	}
+	if !strings.Contains(formattedStr, "key_3") || !strings.Contains(formattedStr, "val_3") {
+		t.Fatalf("bind variable 'key_3': 'val_3' is not formatted")
+	}
+	if !strings.Contains(formattedStr, "key_4:type:TUPLE") {
+		t.Fatalf("bind variable 'key_4': (1, 2) is not formatted")
+	}
+
+	formattedStr = FormatBindVariables(bindVariables, false /* full */, false /* asJSON */)
+	if !strings.Contains(formattedStr, "key_1") {
+		t.Fatalf("bind variable 'key_1' is not formatted")
+	}
+	if !strings.Contains(formattedStr, "key_2") ||
+		!strings.Contains(formattedStr, "789") {
+		t.Fatalf("bind variable 'key_2': '789' is not formatted")
+	}
+	if !strings.Contains(formattedStr, "key_3") || !strings.Contains(formattedStr, "5 bytes") {
+		t.Fatalf("bind variable 'key_3' is not formatted")
+	}
+	if !strings.Contains(formattedStr, "key_4") || !strings.Contains(formattedStr, "2 items") {
+		t.Fatalf("bind variable 'key_4' is not formatted")
+	}
+
+	formattedStr = FormatBindVariables(bindVariables, true /* full */, true /* asJSON */)
+	t.Logf("%q", formattedStr)
+	if !strings.Contains(formattedStr, "\"key_1\": {\"type\": \"VARCHAR\", \"value\": \"val_1\"}") {
+		t.Fatalf("bind variable 'key_1' is not formatted")
+	}
+
+	if !strings.Contains(formattedStr, "\"key_2\": {\"type\": \"INT64\", \"value\": 789}") {
+		t.Fatalf("bind variable 'key_2' is not formatted")
+	}
+
+	if !strings.Contains(formattedStr, "\"key_3\": {\"type\": \"VARBINARY\", \"value\": \"val_3\"}") {
+		t.Fatalf("bind variable 'key_3' is not formatted")
+	}
+
+	if !strings.Contains(formattedStr, "\"key_4\": {\"type\": \"TUPLE\", \"value\": \"\"}") {
+		t.Fatalf("bind variable 'key_4' is not formatted")
+	}
+
+	formattedStr = FormatBindVariables(bindVariables, false /* full */, true /* asJSON */)
+	if !strings.Contains(formattedStr, "\"key_1\": {\"type\": \"VARCHAR\", \"value\": \"5 bytes\"}") {
+		t.Fatalf("bind variable 'key_1' is not formatted")
+	}
+
+	if !strings.Contains(formattedStr, "\"key_2\": {\"type\": \"INT64\", \"value\": 789}") {
+		t.Fatalf("bind variable 'key_2' is not formatted")
+	}
+
+	if !strings.Contains(formattedStr, "\"key_3\": {\"type\": \"VARCHAR\", \"value\": \"5 bytes\"}") {
+		t.Fatalf("bind variable 'key_3' is not formatted")
+	}
+
+	if !strings.Contains(formattedStr, "\"key_4\": {\"type\": \"VARCHAR\", \"value\": \"2 items\"}") {
+		t.Fatalf("bind variable 'key_4' is not formatted")
 	}
 }
